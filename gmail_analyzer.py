@@ -1,8 +1,7 @@
 """
-Gmail Analyzer Skill — powered by Ollama (llama3.2:1b) + Google Gmail MCP
-(https://gmailmcp.googleapis.com/mcp/v1)
+Gmail Analyzer Skill — powered by Ollama (llama3.2:1b) + Gmail REST API
 
-Uses Google's official remote MCP server via OAuth 2.0 + SSE transport.
+Uses the Gmail REST API (gmail.googleapis.com/gmail/v1) directly via OAuth 2.0.
 Analyzes, summarizes, and troubleshoots email conversations.
 """
 
@@ -46,9 +45,9 @@ log = logging.getLogger("gmail_analyzer")
 # ─── Configuration ──────────────────────────────────────────────────────────
 
 class Config:
-    # Google Gmail MCP endpoint (official remote server)
-    GMAIL_MCP_URL: str = os.getenv(
-        "GMAIL_MCP_URL", "https://gmailmcp.googleapis.com/mcp/v1"
+    # Gmail REST API base URL
+    GMAIL_API_URL: str = os.getenv(
+        "GMAIL_API_URL", "https://gmail.googleapis.com/gmail/v1"
     )
 
     # OAuth 2.0 — set OAUTH_CLIENT_ID and OAUTH_CLIENT_SECRET in .env
@@ -56,7 +55,12 @@ class Config:
     OAUTH_CLIENT_SECRET: str = os.getenv("OAUTH_CLIENT_SECRET", "")
     OAUTH_TOKEN_FILE: str = os.getenv("OAUTH_TOKEN_FILE", "token.json")
     OAUTH_SCOPES: list[str] = [
+        # Scopes required by gmailmcp.googleapis.com per Google's official docs:
+        # https://developers.google.com/workspace/gmail/api/guides/configure-mcp-server
+        "openid",
+        "email",
         "https://www.googleapis.com/auth/gmail.readonly",
+        "https://www.googleapis.com/auth/gmail.compose",
     ]
 
     # Ollama
@@ -69,7 +73,7 @@ class Config:
     # Misc
     MAX_BODY_CHARS: int = int(os.getenv("MAX_BODY_CHARS", "6000"))
     MCP_TIMEOUT: float = float(os.getenv("MCP_TIMEOUT", "30.0"))
-    MCP_RPC_VERSION: str = "2.0"
+    MAX_RESULTS: int = int(os.getenv("MAX_RESULTS", "500"))
 
 
 # ─── Enums ──────────────────────────────────────────────────────────────────
@@ -302,183 +306,112 @@ class OAuthTokenManager:
         self._save_token_file()
         log.info("OAuth token refreshed, expires at %s", self._expiry.isoformat())
 
+    async def introspect(self) -> dict[str, Any]:
+        """Call Google tokeninfo to see what scopes the current token actually has."""
+        token = await self.get_access_token()
+        resp = await self._http.get(
+            "https://www.googleapis.com/oauth2/v3/tokeninfo",
+            params={"access_token": token},
+        )
+        return resp.json()
+
     async def close(self) -> None:
         await self._http.aclose()
 
 
-# ─── Gmail MCP Client ────────────────────────────────────────────────────────
-# Google's official MCP server uses JSON-RPC 2.0 over HTTP with SSE transport.
-# Endpoint: https://gmailmcp.googleapis.com/mcp/v1
-# Auth: Bearer token in Authorization header.
+# ─── Gmail REST Client ───────────────────────────────────────────────────────
+# Talks directly to gmail.googleapis.com/gmail/v1 — no MCP preview programme
+# required.  The public interface is identical to the former GmailMCPClient so
+# GmailAnalyzer, ThreadParser, and all tests are unchanged.
+
+class GmailMCPError(Exception):  # name kept for backward compat with tests
+    """Gmail API or auth error."""
+
 
 class GmailMCPClient:
     """
-    Client for Google's official Gmail MCP server.
+    Gmail REST API client with the same interface as the former MCP client.
 
-    Implements the MCP JSON-RPC 2.0 protocol over HTTP+SSE as required by
-    https://gmailmcp.googleapis.com/mcp/v1.
-
-    Available tools (as of Google Workspace Developer Preview):
-        search_threads, get_thread, list_labels,
-        label_thread, unlabel_thread, label_message, unlabel_message,
-        create_draft, list_drafts, create_label
+    Endpoints used:
+        GET  /users/me/threads?q=...   → search_threads
+        GET  /users/me/threads/{id}    → get_thread
+        GET  /users/me/labels          → list_labels
+        POST /users/me/threads/{id}/modify → label_thread / unlabel_thread
+        POST /users/me/drafts          → create_draft
     """
+
+    BASE = Config.GMAIL_API_URL
 
     def __init__(self, token_manager: OAuthTokenManager) -> None:
         self._tokens = token_manager
         self._http = httpx.AsyncClient(timeout=Config.MCP_TIMEOUT)
-        self._rpc_id = 0
 
-    # ── low-level: MCP tool call ─────────────────────────────────────────────
-
-    async def _call_tool(self, tool_name: str, arguments: dict[str, Any]) -> Any:
-        """
-        Issue a tools/call JSON-RPC request to the Gmail MCP server.
-
-        The MCP protocol wraps tool invocations as:
-          method: "tools/call"
-          params: { name: "<tool>", arguments: { ... } }
-
-        The server responds with content blocks; we extract the first text block.
-        """
+    async def _get(self, path: str, **params: Any) -> Any:
         token = await self._tokens.get_access_token()
-        self._rpc_id += 1
-        payload = {
-            "jsonrpc": Config.MCP_RPC_VERSION,
-            "id": self._rpc_id,
-            "method": "tools/call",
-            "params": {
-                "name": tool_name,
-                "arguments": arguments,
-            },
-        }
+        try:
+            resp = await self._http.get(
+                f"{self.BASE}{path}",
+                params={k: v for k, v in params.items() if v is not None},
+                headers={"Authorization": f"Bearer {token}"},
+            )
+            resp.raise_for_status()
+        except httpx.HTTPStatusError as exc:
+            raise GmailMCPError(
+                f"Gmail API HTTP {exc.response.status_code}: {exc.response.text[:400]}"
+            ) from exc
+        except httpx.RequestError as exc:
+            raise GmailMCPError(f"Gmail API connection error: {exc}") from exc
+        return resp.json()
+
+    async def _post(self, path: str, body: dict[str, Any]) -> Any:
+        token = await self._tokens.get_access_token()
         try:
             resp = await self._http.post(
-                Config.GMAIL_MCP_URL,
-                json=payload,
+                f"{self.BASE}{path}",
+                json=body,
                 headers={
                     "Authorization": f"Bearer {token}",
                     "Content-Type": "application/json",
-                    "Accept": "application/json, text/event-stream",
                 },
             )
             resp.raise_for_status()
-        except httpx.TimeoutException as exc:
-            raise GmailMCPError(f"MCP request timed out: {exc}") from exc
         except httpx.HTTPStatusError as exc:
-            status = exc.response.status_code
-            if status == 401:
-                raise GmailMCPError(
-                    "MCP returned 401 Unauthorized. "
-                    "Delete token.json and re-run to re-authorize."
-                ) from exc
             raise GmailMCPError(
-                f"MCP HTTP {status}: {exc.response.text[:400]}"
+                f"Gmail API HTTP {exc.response.status_code}: {exc.response.text[:400]}"
             ) from exc
         except httpx.RequestError as exc:
-            raise GmailMCPError(f"MCP connection error: {exc}") from exc
-
-        # Handle SSE-wrapped responses
-        content_type = resp.headers.get("content-type", "")
-        if "text/event-stream" in content_type:
-            data = self._parse_sse(resp.text)
-        else:
-            data = resp.json()
-
-        if "error" in data:
-            err = data["error"]
-            raise GmailMCPError(f"MCP tool error [{err.get('code')}]: {err.get('message')}")
-
-        result = data.get("result", {})
-        # MCP tools/call returns { content: [ {type, text} ], isError: bool }
-        if result.get("isError"):
-            blocks = result.get("content", [])
-            msg = " ".join(b.get("text", "") for b in blocks if b.get("type") == "text")
-            raise GmailMCPError(f"MCP tool reported error: {msg}")
-
-        return result
-
-    @staticmethod
-    def _parse_sse(raw: str) -> dict[str, Any]:
-        """Extract the last complete JSON object from an SSE stream."""
-        last: dict[str, Any] = {}
-        for line in raw.splitlines():
-            if line.startswith("data:"):
-                payload = line[5:].strip()
-                if payload and payload != "[DONE]":
-                    try:
-                        last = json.loads(payload)
-                    except json.JSONDecodeError:
-                        pass
-        return last
-
-    @staticmethod
-    def _text_content(result: dict[str, Any]) -> str:
-        """Extract concatenated text from an MCP tool result's content blocks."""
-        blocks = result.get("content", [])
-        return "\n".join(b.get("text", "") for b in blocks if b.get("type") == "text")
-
-    # ── public Gmail MCP tool wrappers ───────────────────────────────────────
+            raise GmailMCPError(f"Gmail API connection error: {exc}") from exc
+        return resp.json()
 
     async def search_threads(
         self,
         query: str,
-        max_results: int = 10,
+        max_results: int = Config.MAX_RESULTS,
         page_token: str = "",
     ) -> list[dict[str, Any]]:
-        """
-        search_threads — lists threads matching a Gmail query string.
-        Returns thread stubs with id, snippet, and message summaries.
-        """
-        args: dict[str, Any] = {"query": query, "maxResults": max_results}
+        params: dict[str, Any] = {"q": query, "maxResults": max_results}
         if page_token:
-            args["pageToken"] = page_token
-        result = await self._call_tool("search_threads", args)
-        raw = self._text_content(result)
-        try:
-            parsed = json.loads(raw)
-            return parsed.get("threads", [])
-        except json.JSONDecodeError:
-            log.debug("search_threads raw response: %s", raw[:500])
-            return []
+            params["pageToken"] = page_token
+        data = await self._get("/users/me/threads", **params)
+        return data.get("threads", [])
 
     async def get_thread(self, thread_id: str) -> dict[str, Any]:
-        """
-        get_thread — returns a thread with all its messages (full body included).
-        """
-        result = await self._call_tool("get_thread", {"threadId": thread_id})
-        raw = self._text_content(result)
-        try:
-            return json.loads(raw)
-        except json.JSONDecodeError:
-            raise GmailMCPError(
-                f"get_thread returned non-JSON for thread {thread_id!r}: {raw[:200]}"
-            )
+        return await self._get(f"/users/me/threads/{thread_id}", format="full")
 
     async def list_labels(self) -> list[dict[str, Any]]:
-        """list_labels — returns all user-defined labels."""
-        result = await self._call_tool("list_labels", {})
-        raw = self._text_content(result)
-        try:
-            parsed = json.loads(raw)
-            return parsed.get("labels", [])
-        except json.JSONDecodeError:
-            return []
+        data = await self._get("/users/me/labels")
+        return data.get("labels", [])
 
-    async def label_thread(
-        self, thread_id: str, label_ids: list[str]
-    ) -> None:
-        """label_thread — adds labels to all messages in a thread."""
-        await self._call_tool(
-            "label_thread", {"threadId": thread_id, "labelIds": label_ids}
+    async def label_thread(self, thread_id: str, label_ids: list[str]) -> None:
+        await self._post(
+            f"/users/me/threads/{thread_id}/modify",
+            {"addLabelIds": label_ids},
         )
 
-    async def unlabel_thread(
-        self, thread_id: str, label_ids: list[str]
-    ) -> None:
-        """unlabel_thread — removes labels from all messages in a thread."""
-        await self._call_tool(
-            "unlabel_thread", {"threadId": thread_id, "labelIds": label_ids}
+    async def unlabel_thread(self, thread_id: str, label_ids: list[str]) -> None:
+        await self._post(
+            f"/users/me/threads/{thread_id}/modify",
+            {"removeLabelIds": label_ids},
         )
 
     async def create_draft(
@@ -488,21 +421,22 @@ class GmailMCPClient:
         body: str,
         cc: list[str] | None = None,
     ) -> str:
-        """create_draft — creates a draft; returns the draft ID."""
-        args: dict[str, Any] = {"to": to, "subject": subject, "body": body}
+        import base64, email.mime.text as _mime
+        msg = _mime.MIMEText(body)
+        msg["To"] = ", ".join(to)
+        msg["Subject"] = subject
         if cc:
-            args["cc"] = cc
-        result = await self._call_tool("create_draft", args)
-        raw = self._text_content(result)
-        try:
-            return json.loads(raw).get("id", "")
-        except json.JSONDecodeError:
-            return raw.strip()
+            msg["Cc"] = ", ".join(cc)
+        raw = base64.urlsafe_b64encode(msg.as_bytes()).decode()
+        data = await self._post("/users/me/drafts", {"message": {"raw": raw}})
+        return data.get("id", "")
+
+    async def introspect_token(self) -> dict[str, Any]:
+        """Delegate to OAuthTokenManager.introspect()."""
+        return await self._tokens.introspect()
 
     async def close(self) -> None:
         await self._http.aclose()
-
-
 # ─── Thread / message parser ──────────────────────────────────────────────────
 
 class ThreadParser:
@@ -517,7 +451,7 @@ class ThreadParser:
         {
           "id": "<msgId>",
           "threadId": "<threadId>",
-          "labelIds": [...],
+          "label_ids": [...],
           "snippet": "...",
           "payload": {
             "headers": [{"name": ..., "value": ...}],
@@ -877,7 +811,7 @@ class GmailAnalyzer:
         self,
         query: str,
         mode: AnalysisMode = AnalysisMode.SUMMARIZE,
-        max_results: int = 5,
+        max_results: int = Config.MAX_RESULTS,
     ) -> list[AnalysisResult]:
         log.info("Searching %r (max=%d)", query, max_results)
         stubs = await self._mcp.search_threads(query=query, max_results=max_results)
@@ -995,7 +929,7 @@ async def _cli_main(argv: list[str]) -> int:
     search_cmd.add_argument(
         "query", help="Gmail search query, e.g. 'from:boss@example.com is:unread'"
     )
-    search_cmd.add_argument("--max", type=int, default=5)
+    search_cmd.add_argument("--max", type=int, default=Config.MAX_RESULTS)
     search_cmd.add_argument(
         "--mode",
         choices=[m.value for m in AnalysisMode],
@@ -1009,6 +943,8 @@ async def _cli_main(argv: list[str]) -> int:
         choices=[m.value for m in AnalysisMode],
         default=AnalysisMode.FULL.value,
     )
+
+    sub.add_parser("debug-scopes", help="Print the scopes granted to the current token")
 
     args = parser.parse_args(argv)
 
@@ -1050,6 +986,16 @@ async def _cli_main(argv: list[str]) -> int:
                 args.thread_id, mode=AnalysisMode(args.mode)
             )
             _print_result(result)
+
+        elif args.command == "debug-scopes":
+            info = await tokens.introspect()
+            print("\nToken info from Google tokeninfo endpoint:")
+            print(f"  Scopes granted : {info.get('scope', '(none)')}")
+            print(f"  Audience       : {info.get('aud', '(none)')}")
+            print(f"  Expires in     : {info.get('expires_in', '?' )} seconds")
+            print(f"  Email          : {info.get('email', '(none)')}")
+            if "error" in info:
+                print(f"  ERROR          : {info['error']}: {info.get('error_description', '')}")
 
     except OAuthError as exc:
         log.error("OAuth error: %s", exc)

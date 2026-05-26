@@ -16,12 +16,12 @@ gmail-analyzer = "gmail_analyzer:main"
 requires = ["hatchling"]
 build-backend = "hatchling.build"
 
-[tool.uv]
-dev-dependencies = [
+[dependency-groups]
+dev = [
     "pytest>=8.3.0",
     "pytest-asyncio>=0.24.0",
     "pytest-mock>=3.14.0",
-    "respx>=0.21.0",       # mock httpx calls
+    "respx>=0.21.0",
     "ruff>=0.6.0",
     "mypy>=1.11.0",
 ]
@@ -29,6 +29,7 @@ dev-dependencies = [
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
 testpaths = ["tests"]
+pythonpath = ["."]
 log_cli = true
 log_cli_level = "WARNING"
 

@@ -472,9 +472,13 @@ class TestOllamaClient:
         await client.close()
 
 
-# ─── GmailMCPClient ───────────────────────────────────────────────────────────
+# ─── GmailMCPClient (now wraps Gmail REST API) ──────────────────────────────────
 
 class TestGmailMCPClient:
+    """Tests for GmailMCPClient, which now uses the Gmail REST API directly."""
+
+    BASE = "https://gmail.googleapis.com/gmail/v1"
+
     def _make_client(self, token: str = "tok") -> GmailMCPClient:
         tokens = AsyncMock(spec=OAuthTokenManager)
         tokens.get_access_token.return_value = token
@@ -482,8 +486,8 @@ class TestGmailMCPClient:
 
     @respx.mock
     async def test_search_threads_success(self) -> None:
-        respx.post(Config.GMAIL_MCP_URL).mock(
-            return_value=_mcp_ok({"threads": [{"id": "t1"}, {"id": "t2"}]})
+        respx.get(f"{self.BASE}/users/me/threads").mock(
+            return_value=httpx.Response(200, json={"threads": [{"id": "t1"}, {"id": "t2"}]})
         )
         client = self._make_client()
         threads = await client.search_threads("from:test@example.com")
@@ -492,7 +496,9 @@ class TestGmailMCPClient:
 
     @respx.mock
     async def test_get_thread_success(self) -> None:
-        respx.post(Config.GMAIL_MCP_URL).mock(return_value=_mcp_ok(RAW_THREAD))
+        respx.get(f"{self.BASE}/users/me/threads/thread_001").mock(
+            return_value=httpx.Response(200, json=RAW_THREAD)
+        )
         client = self._make_client()
         result = await client.get_thread("thread_001")
         assert result["id"] == "thread_001"
@@ -500,8 +506,8 @@ class TestGmailMCPClient:
 
     @respx.mock
     async def test_list_labels_success(self) -> None:
-        respx.post(Config.GMAIL_MCP_URL).mock(
-            return_value=_mcp_ok({"labels": [{"id": "Label_1", "name": "Work"}]})
+        respx.get(f"{self.BASE}/users/me/labels").mock(
+            return_value=httpx.Response(200, json={"labels": [{"id": "Label_1", "name": "Work"}]})
         )
         client = self._make_client()
         labels = await client.list_labels()
@@ -510,37 +516,27 @@ class TestGmailMCPClient:
 
     @respx.mock
     async def test_mcp_rpc_error_raises(self) -> None:
-        respx.post(Config.GMAIL_MCP_URL).mock(
-            return_value=_mcp_error(-32600, "Invalid request")
+        respx.get(f"{self.BASE}/users/me/threads").mock(
+            return_value=httpx.Response(400, json={"error": {"message": "Bad Request"}})
         )
         client = self._make_client()
-        with pytest.raises(GmailMCPError, match="Invalid request"):
+        with pytest.raises(GmailMCPError, match="400"):
             await client.search_threads("test")
         await client.close()
 
     @respx.mock
     async def test_mcp_tool_error_raises(self) -> None:
-        respx.post(Config.GMAIL_MCP_URL).mock(
-            return_value=httpx.Response(
-                200,
-                json={
-                    "jsonrpc": "2.0",
-                    "id": 1,
-                    "result": {
-                        "isError": True,
-                        "content": [{"type": "text", "text": "Thread not found"}],
-                    },
-                },
-            )
+        respx.get(f"{self.BASE}/users/me/threads/bad_id").mock(
+            return_value=httpx.Response(404, json={"error": {"message": "Thread not found"}})
         )
         client = self._make_client()
-        with pytest.raises(GmailMCPError, match="Thread not found"):
+        with pytest.raises(GmailMCPError, match="404"):
             await client.get_thread("bad_id")
         await client.close()
 
     @respx.mock
     async def test_http_401_raises(self) -> None:
-        respx.post(Config.GMAIL_MCP_URL).mock(
+        respx.get(f"{self.BASE}/users/me/threads").mock(
             return_value=httpx.Response(401, text="Unauthorized")
         )
         client = self._make_client()
@@ -550,7 +546,7 @@ class TestGmailMCPClient:
 
     @respx.mock
     async def test_connection_error_raises(self) -> None:
-        respx.post(Config.GMAIL_MCP_URL).mock(
+        respx.get(f"{self.BASE}/users/me/threads").mock(
             side_effect=httpx.ConnectError("refused")
         )
         client = self._make_client()
@@ -560,7 +556,7 @@ class TestGmailMCPClient:
 
     @respx.mock
     async def test_timeout_raises(self) -> None:
-        respx.post(Config.GMAIL_MCP_URL).mock(
+        respx.get(f"{self.BASE}/users/me/threads").mock(
             side_effect=httpx.TimeoutException("timed out")
         )
         client = self._make_client()
@@ -570,8 +566,8 @@ class TestGmailMCPClient:
 
     @respx.mock
     async def test_bearer_token_sent(self) -> None:
-        route = respx.post(Config.GMAIL_MCP_URL).mock(
-            return_value=_mcp_ok({"threads": []})
+        route = respx.get(f"{self.BASE}/users/me/threads").mock(
+            return_value=httpx.Response(200, json={"threads": []})
         )
         client = self._make_client(token="my_secret_token")
         await client.search_threads("test")
@@ -580,22 +576,15 @@ class TestGmailMCPClient:
         await client.close()
 
     @respx.mock
-    async def test_sse_response_parsed(self) -> None:
-        sse_body = (
-            "data: {\"jsonrpc\":\"2.0\",\"id\":1,\"result\":"
-            "{\"content\":[{\"type\":\"text\",\"text\":\"{\\\"threads\\\":[{\\\"id\\\":\\\"t1\\\"}]}\"}],"
-            "\"isError\":false}}\n\n"
-        )
-        respx.post(Config.GMAIL_MCP_URL).mock(
-            return_value=httpx.Response(
-                200,
-                content=sse_body.encode(),
-                headers={"content-type": "text/event-stream"},
-            )
+    async def test_search_sends_query_param(self) -> None:
+        route = respx.get(f"{self.BASE}/users/me/threads").mock(
+            return_value=httpx.Response(200, json={"threads": []})
         )
         client = self._make_client()
-        threads = await client.search_threads("test")
-        assert threads == [{"id": "t1"}]
+        await client.search_threads("is:unread", max_results=3)
+        qs = dict(httpx.URL(str(route.calls[0].request.url)).params)
+        assert qs["q"] == "is:unread"
+        assert qs["maxResults"] == "3"
         await client.close()
 
 
