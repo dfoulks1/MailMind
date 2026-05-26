@@ -1,0 +1,28 @@
+{
+  "_comment": "Copy this file to config.json to override defaults. config.json is gitignored.",
+
+  "rateLimit": {
+    "_comment": "Max Gmail API calls per windowMs milliseconds. Increase carefully — free tier = 250 units/sec.",
+    "maxRequests": 20,
+    "windowMs": 10000
+  },
+
+  "fetch": {
+    "_comment": "Hard cap on messages fetched per summarize_inbox call. Higher = slower + more quota used.",
+    "maxMessagesPerCall": 100,
+    "_maxMessagesPerCallMax": 500
+  },
+
+  "summarizer": {
+    "_comment": "How many urgent/actionable/cluster items to include in the report.",
+    "maxUrgentItems": 20,
+    "maxActionableItems": 20,
+    "maxThreadClusters": 30,
+    "maxTopSenders": 10
+  },
+
+  "mcpServer": {
+    "_comment": "Transport type. Currently only 'stdio' is supported (required for Ollama/Claude Desktop).",
+    "transport": "stdio"
+  }
+}

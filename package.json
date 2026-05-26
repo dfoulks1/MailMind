@@ -1,0 +1,41 @@
+{
+  "name": "gmail-mcp-server",
+  "version": "1.0.0",
+  "description": "MCP Server for Google Gmail API — lets an LLM client (e.g. Ollama/llama3.2) read and summarize your inbox.",
+  "type": "module",
+  "main": "src/mcp-server.js",
+  "bin": {
+    "gmail-mcp-server": "src/mcp-server.js"
+  },
+  "scripts": {
+    "start": "node src/mcp-server.js",
+    "auth": "node src/auth/get-refresh-token.js",
+    "dev": "node --watch src/mcp-server.js"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.0.0",
+    "dotenv": "^16.4.5",
+    "google-auth-library": "^9.11.0",
+    "googleapis": "^140.0.0",
+    "nvm": "^0.0.4",
+    "zod": "^3.23.8"
+  },
+  "devDependencies": {
+    "@types/node": "^20.0.0"
+  },
+  "engines": {
+    "node": ">=18.0.0"
+  },
+  "keywords": [
+    "mcp",
+    "gmail",
+    "llm",
+    "ollama",
+    "model-context-protocol"
+  ],
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/dfoulks1/gmail-analyzer.git"
+  }
+}
