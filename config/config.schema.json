@@ -1,0 +1,54 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "MailmindConfig",
+  "type": "object",
+  "required": ["gmail", "cache", "rag", "mcp", "search"],
+  "properties": {
+    "gmail": {
+      "type": "object",
+      "required": ["credentials_file", "token_file", "scopes"],
+      "properties": {
+        "credentials_file": { "type": "string" },
+        "token_file":        { "type": "string" },
+        "scopes":            { "type": "array", "items": { "type": "string" } }
+      }
+    },
+    "cache": {
+      "type": "object",
+      "required": ["mongo_uri", "mongo_db", "mongo_collection", "redis_url"],
+      "properties": {
+        "mongo_uri":         { "type": "string" },
+        "mongo_db":          { "type": "string" },
+        "mongo_collection":  { "type": "string" },
+        "redis_url":         { "type": "string" }
+      }
+    },
+    "rag": {
+      "type": "object",
+      "required": ["index_dir", "ollama_url", "ollama_model"],
+      "properties": {
+        "index_dir":         { "type": "string" },
+        "ollama_url":        { "type": "string", "format": "uri" },
+        "ollama_model":      { "type": "string" },
+        "max_ingest_batch":  { "type": "integer", "minimum": 1 }
+      }
+    },
+    "mcp": {
+      "type": "object",
+      "required": ["transport"],
+      "properties": {
+        "transport":  { "type": "string", "enum": ["stdio", "sse"] },
+        "host":       { "type": "string" },
+        "port":       { "type": "integer", "minimum": 1, "maximum": 65535 },
+        "log_level":  { "type": "string", "enum": ["DEBUG", "INFO", "WARNING", "ERROR"] }
+      }
+    },
+    "search": {
+      "type": "object",
+      "properties": {
+        "default_top_k":    { "type": "integer", "minimum": 1 },
+        "min_similarity":   { "type": "number", "minimum": 0, "maximum": 1 }
+      }
+    }
+  }
+}

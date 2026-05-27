@@ -1,0 +1,41 @@
+# Mailmind shared configuration
+# Used by both the RAG background service and the MCP server.
+
+gmail:
+  credentials_file: "${GMAIL_CREDENTIALS_FILE:credentials.json}"
+  token_file: "${GMAIL_TOKEN_FILE:token.json}"
+  scopes:
+    - https://www.googleapis.com/auth/gmail.readonly
+    - https://www.googleapis.com/auth/gmail.modify
+    - https://www.googleapis.com/auth/gmail.labels
+
+cache:
+  # MongoDB for message/embedding cache
+  mongo_uri: "${MONGO_URI:mongodb://localhost:27017}"
+  mongo_db: "${MONGO_DB:mailmind}"
+  mongo_collection: "${MONGO_COLLECTION:emails}"
+  # Redis for task queuing
+  redis_url: "${REDIS_URL:redis://localhost:6379/0}"
+
+rag:
+  # Directory where the RAG index files are stored
+  index_dir: "${RAG_INDEX_DIR:./data/rag_index}"
+  # Ollama endpoint for LLM summarization
+  ollama_url: "${OLLAMA_URL:http://localhost:11434}"
+  ollama_model: "${OLLAMA_MODEL:llama3.2:1b}"
+  # Maximum emails to ingest per refresh cycle
+  max_ingest_batch: 50
+
+mcp:
+  # Transport: "stdio" (default for Claude Desktop) or "sse"
+  transport: "${MCP_TRANSPORT:stdio}"
+  # Only used when transport == "sse"
+  host: "${MCP_HOST:0.0.0.0}"
+  port: "${MCP_PORT:8000}"
+  log_level: "${LOG_LEVEL:INFO}"
+
+search:
+  # Default number of results returned by semantic search
+  default_top_k: 10
+  # Similarity threshold (0.0–1.0); results below this are discarded
+  min_similarity: 0.5
