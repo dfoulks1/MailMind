@@ -64,7 +64,7 @@ export async function fetchRecentMessages(gmail, { daysBack, priority, rateLimit
     listResponse = await gmail.users.messages.list({
       userId: 'me',
       q: query,
-      maxResults: 100, // Cap per call; Gmail returns up to 500 but 100 keeps quota sane
+      maxResults: 500, // Cap per call; Gmail returns up to 500 but 100 keeps quota sane
     });
   } catch (err) {
     throw enrichGmailError(err);
