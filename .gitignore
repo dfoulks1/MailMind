@@ -1,7 +1,7 @@
 # Credentials — never commit these
 .env
 token.json
-
+*.db
 # Python
 __pycache__/
 *.py[cod]
